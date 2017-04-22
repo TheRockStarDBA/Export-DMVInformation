@@ -1,4 +1,4 @@
-﻿################################################################################
+################################################################################
 #  Written by Sander Stad, SQLStad.nl
 # 
 #  (c) 2016, SQLStad.nl. All rights reserved.
@@ -20,115 +20,135 @@
 #  v1.0: Initial version
 #  v1.1: Fixed issues with parsing the older DMV files < 2012
 #        Made the download of the DMV files more efficient
+#  v2.0: Modified module to get values from pipeline
+#        Inserted option to select all databases
 #
 ################################################################################
 
 
 function Export-DMVInformation
 {
-    <# 
-    .SYNOPSIS
-        Parse the DMV query files made by Glen Berry and export the results to an Excel document
+<# 
+.SYNOPSIS
+Parse the DMV query files made by Glen Berry and export the results to an Excel document
+
+.DESCRIPTION
+The script will parse a specific DMV query file made by Glen Berry.
+After parsing the queries it will loop through each of the queries and
+if needed execute it. 
+The script will write the results to an Excel file.
+
+.PARAMETER instance
+The instance to connect to
     
-    .DESCRIPTION
-        The script will parse a specific DMV query file made by Glen Berry.
-        After parsing the queries it will loop through each of the queries and
-        if needed execute it. 
-        The script will write the results to an Excel file.
+.PARAMETER database 
+The database to query out
+
+.PARAMETER dmvLocation
+The location where to find the DMV query files
+
+.PARAMETER destination
+The destination where to write the results to
+
+.PARAMETER excludeinstance
+Flag to exclude the queries for the instance
     
-    .PARAMETER instance
-        The instance to connect to
-        
-    .PARAMETER database 
-        The database to query out
+.PARAMETER SqlCredential
+Allows you to login to servers using SQL Logins as opposed to Windows Auth/Integrated/Trusted. To use:
+$scred = Get-Credential, then pass $scred object to the -SqlCredential parameter. 
+To connect as a different Windows user, run PowerShell as that user.
 
-    .PARAMETER dmvLocation
-        The location where to find the DMV query files
+.PARAMETER queryTimout
+Timeout how long a query may take in seconds 
 
-    .PARAMETER destination
-        The destination where to write the results to
+.EXAMPLE
+Get-DMVInformation -instance 'SERVER1' 
 
-    .PARAMETER excludeinstance
-        Flag to exclude the queries for the instance
-    
-    .PARAMETER username
-        Username needed if SQL authentication is required
-    
-    .PARAMETER password
-        Password needed if SQL authentication is required
+.EXAMPLE
+Get-DMVInformation -instance 'SERVER1' -database 'DB1' -includeInstance $false
 
-    .PARAMETER queryTimout
-        Timeout how long a query may take in seconds 
+.EXAMPLE    
+Get-DMVInformation -instance 'SERVER1' -database 'DB1' -destination 'C:\Temp\dmv\results'
 
-    .EXAMPLE
-        Get-DMVInformation -instance 'SERVER1' 
+.EXAMPLE    
+server1, server2, server3 | Get-DMVInformation -database 'DB1' -destination 'C:\Temp\dmv\results'
 
-    .EXAMPLE
-        Get-DMVInformation -instance 'SERVER1' -database 'DB1' -includeInstance $false
-
-    .EXAMPLE    
-        Get-DMVInformation -instance 'SERVER1' -database 'DB1' -destination 'C:\Temp\dmv\results'
-
-    .INPUTS
-    .OUTPUTS
-    .NOTES
-    .LINK
-        Module ImportExcel: https://github.com/dfinke/ImportExcel
-        Glenn Berry's DMV site: http://www.sqlskills.com/blogs/glenn/category/dmv-queries/
-    #>
+.INPUTS
+.OUTPUTS
+.NOTES
+.LINK
+Module ImportExcel: https://github.com/dfinke/ImportExcel
+dbatools: http://dbatools.io/
+Glenn Berry's DMV site: http://www.sqlskills.com/blogs/glenn/category/dmv-queries/
+#>
 
     param(
-        [Parameter(Mandatory=$true, Position=1)][ValidateNotNullOrEmpty()]
-        [string]$instance,
+        [Parameter(Mandatory=$true, Position=1, ValueFromPipeline=$true)][ValidateNotNullOrEmpty()]
+        [string[]]$instance,
         [Parameter(Mandatory=$false, Position=2)]
-        [string]$database = $null,
-        [Parameter(Mandatory=$false, Position=3)]
-        [string]$username = $null,
-        [Parameter(Mandatory=$false, Position=4)]
-        [string]$password = $null,
+        [string[]]$database = 'ALL',
+        [Parameter(Mandatory = $false)]
+        [System.Management.Automation.PSCredential]$SqlCredential,
         [Parameter(Mandatory=$false, Position=5)]
         [string]$dmvlocation = ([Environment]::GetFolderPath("MyDocuments") + "\dmv\queries"),
         [Parameter(Mandatory=$false, Position=6)]
         [string]$destination = ([Environment]::GetFolderPath("MyDocuments") + "\dmv\results"),
         [Parameter(Mandatory=$false, Position=7)]
-        [bool]$excludeinstance = $false,
+        [switch]$excludeinstance,
         [Parameter(Mandatory=$false, Position=8)]
+        [switch]$excludedb,
+        [Parameter(Mandatory=$false, Position=9)]
         [int]$querytimeout = $null
     )
 
-    # Check if The neccesary modules are installed
-    if (Get-Module -Name 'ImportExcel') 
-    {
-            Write-Host 
+	Begin
+	{
+
+		# Check if The neccesary modules are installed
+		if ((Get-Module -Name 'ImportExcel') -and ((Get-Module -Name 'SqlServer') -or (Get-Module -Name 'SQLPS')))
+		{
+				Write-Host 
 "Starting DMV Information Retrieval:
 - Instance:    $instance
 - Database:    $database
 - Destination: $destination
 "
+			# Test the destination
+			if(!(Test-Path $destination))
+			{
+				Write-Host "Destination '$($destination)' doesn't exist. Creating..."
+				New-Item -ItemType directory -Path $destination | Out-Null
+			}
+		} 
+		else 
+		{
+			Write-Host "Module ImportExcel and/or SqlServer not installed or is not imported." -ForegroundColor Red
+		}
+	}
 
-        # Test the destination
-        if(!(Test-Path $destination))
-        {
-            Write-Host "Destination '$destination' doesn't exist. Creating..."
-            New-Item -ItemType directory -Path $destination | Out-Null
-        }
-
-    
-        # Check if assembly is loaded
-        Load-Assembly -name 'Microsoft.SqlServer.Smo'
-
+	Process
+    {
+		
         # Create the SMO server object
-        $srv = New-Object Microsoft.SqlServer.Management.Smo.Server $instance
+        $Server = New-Object Microsoft.SqlServer.Management.Smo.Server $instance
 
-        if($srv.VersionString -ne $null)
+        if($Server.VersionString -ne $null)
         {
-            # Test if the database exists
-            if((($database -ne $null) -or ($database -ne '')) -and ($srv.Databases.Name -notcontains $database))
+            if(-not $excludedb)
             {
-                Write-Host "Database '$database' doesn't exists on '$instance'. Setting database to 'master'." -ForegroundColor Yellow
-                $database = 'master'
+                # Check the database parameter
+                if($database.ToUpper() -eq 'ALL')
+                {
+                    # Get all databases
+                    $database = ($Server.Databases | Where-Object {$_.Status -in "Normal", "Normal, Standby"}).Name
+                }
+                # Test if the database exists
+                elseif((($database -ne $null) -or ($database -ne '')) -and ($Server.Databases.Name -notcontains $database))
+                {
+                    Write-Host "Database '$database' doesn't exists on '$instance'. Setting database to 'master'." -ForegroundColor Yellow
+                    $database = 'master'
+                }
             }
-            
             # Reset the dmv file
             $dmvFile = ''
 
@@ -141,22 +161,24 @@ function Export-DMVInformation
                 # Count the files
                 if($dmvFiles.Count -ge 1)
                 {
-                    #switch($srv.VersionString)
-                    switch($srv.VersionString)
+                    #switch($Server.VersionString)
+                    switch($Server.VersionString)
                     {
                         {$_ -like '9*'} {$dmvFile = ($dmvFiles | Where-Object {$_.Name -like 'SQL Server 2005*'}).FullName}
                         {$_ -like '10.0*'} {$dmvFile = ($dmvFiles | Where-Object {$_.Name -like 'SQL Server 2008 D*'}).FullName}
                         {$_ -like '10.5*'} {$dmvFile = ($dmvFiles | Where-Object {$_.Name -like 'SQL Server 2008 R2*'}).FullName}
                         {$_ -like '11*'} {$dmvFile = ($dmvFiles | Where-Object {$_.Name -like 'SQL Server 2012*'}).FullName}
                         {$_ -like '12*'} {$dmvFile = ($dmvFiles | Where-Object {$_.Name -like 'SQL Server 2014*'}).FullName}
+                        {$_ -like '13.0.1*'} {$dmvFile = ($dmvFiles | Where-Object {$_.Name -like 'SQL Server 2016 PreSP1*'}).FullName}
                         {$_ -like '13*'} {$dmvFile = ($dmvFiles | Where-Object {$_.Name -like 'SQL Server 2016*'}).FullName}
+                        {$_ -like '14*'} {$dmvFile = ($dmvFiles | Where-Object {$_.Name -like 'SQL Server 2017*'}).FullName}
                     }
 
                     if(($dmvFile -eq $null) -or ($dmvFile -eq ''))
                     {
                         # Dowload the files
                         Write-Host "File for SQL Server version not found, trying to download..."
-                        $dmvFile = Download-DMVFiles -destination $dmvlocation -sqlversion $srv.VersionString
+                        $dmvFile = Get-DMVFile -destination $dmvlocation -sqlversion $Server.VersionString
                     }
 
                 }
@@ -164,14 +186,14 @@ function Export-DMVInformation
                 {
                     # Dowload the files
                     Write-Host "File for SQL Server version not found, trying to download..."
-                    $dmvFile = Download-DMVFiles -destination $dmvlocation -sqlversion $srv.VersionString
+                    $dmvFile = Get-DMVFile -destination $dmvlocation -sqlversion $Server.VersionString
                 }
             }
             else
             {
                 # Dowload the files
                 Write-Host "File for SQL Server version not found, trying to download..."
-                $dmvFile = Download-DMVFiles -destination $dmvlocation -sqlversion $srv.VersionString
+                $dmvFile = Get-DMVFile -destination $dmvlocation -sqlversion $Server.VersionString
             }
 
             # Use the DMV file to parse the queries
@@ -196,23 +218,26 @@ function Export-DMVInformation
                 # Loop through all the items
                 Foreach($item in $queries)
                 {
+                    # Setting values
+                    $QueryNr = $item.QueryNr
+                    $QueryTitle = $item.QueryTitle
 
                     # Reset the result set
                     $result = $null
 
                     # Check if the query is meant for the instance
-                    if(($item.DBSpecific -eq $false) -and ($excludeinstance -eq $false))
+                    if(($item.DBSpecific -eq $false) -and (-not ($excludeinstance)))
                     {
-                        Write-Host "Executing Query " $item.QueryNr " - " $item.QueryTitle
+                        Write-Host "Executing Query $($QueryNr) - $($QueryTitle)"
 
                         # Execute the query
-                        $result = Execute-Query -instance $instance -database $database -username $username -password $password -query $item.Query -queryTimeout $querytimeout
-                        
+                        $result = Invoke-SqlCmd2 -ServerInstance $instance -Database $db -Query $item.Query -Credential $SqlCredential -QueryTimeout $querytimeout
+                    
                         # Check if any values returned and write to the Excel file
                         if($result -ne $null)
                         {
                             $result | Export-Excel -Path "$destination\$($instance.Replace('\', '$'))_$($timestamp).xlsx" -WorkSheetname $($item.QueryTitle) -TableName $("Table" + $item.QueryNr) -TableStyle Dark9 
-                            
+                        
                         }
                         else
                         {
@@ -222,71 +247,66 @@ function Export-DMVInformation
                     }
 
                     # Check if the query is database specific
-                    if(($item.DBSpecific -eq $true) -and (($database -ne $null) -or ($database -ne '')))
+                    if(($item.DBSpecific -eq $true) -and (-not ($excludedb)))
                     {
-                        Write-Host "Executing Query " $item.QueryNr " - " $item.QueryTitle
-
-                        # Execute the query
-                        $result = Execute-Query -instance $instance -database $database -username $username -password $password -query $item.Query -queryTimeout $querytimeout
-
-                        # Check if any values returned and write to the Excel file
-                        if($result -ne $null)
+                        foreach($db in $database)
                         {
-                            $result | Export-Excel -Path "$destination\$($instance.Replace('\', '$'))_$($database)_$($timestamp).xlsx" -WorkSheetname $($item.QueryTitle) -TableName $("Table" + $item.QueryNr) -TableStyle Dark9  
-                        }
-                        else
-                        {
-                            "No Data" | Export-Excel -Path "$destination\$($instance.Replace('\', '$'))_$($database)_$($timestamp).xlsx" -WorkSheetname $($item.QueryTitle)
+                            Write-Host "Executing Query $($QueryNr) - $($QueryTitle) on $($db)"
+
+                            # Execute the query
+                            $result = Invoke-SqlCmd2 -ServerInstance $instance -Database $db -Query $item.Query -Credential $SqlCredential -QueryTimeout $querytimeout
+
+                            # Check if any values returned and write to the Excel file
+                            if($result -ne $null)
+                            {
+                                $result | Export-Excel -Path "$destination\$($instance.Replace('\', '$'))_$($db)_$($timestamp).xlsx" -WorkSheetname $($item.QueryTitle) -TableName $("Table" + $item.QueryNr) -TableStyle Dark9  
+                            }
+                            else
+                            {
+                                "No Data" | Export-Excel -Path "$destination\$($instance.Replace('\', '$'))_$($db)_$($timestamp).xlsx" -WorkSheetname $($item.QueryTitle)
+                            }
+
                         }
                     }
 
                 }
 
             }
-            else
-            {
-                
-            }
         }
         else
         {
-            Write-Host "Couldn't connect to instance $instance" -ForegroundColor Red 
+            Write-Host "Couldn't connect to instance $i" -ForegroundColor Red 
         }
-    } 
-    else 
-    {
-        Write-Host "Module ImportExcel is not installed or is not imported." -ForegroundColor Red
     }
-
 }
 
-function Download-DMVFiles
+function Get-DMVFile
 {
-    <# 
-    .SYNOPSIS
-        Function to download the DMV files
-    
-    .DESCRIPTION
-        This script will download the DMV files by Glenn Berry to a specific location
-    
-    .PARAMETER destination
-        Destination directory
+<# 
+.SYNOPSIS
+Function to download the DMV files
 
-    .PARAMETER sqlversion
-        DVersion of the instance to specifically download the dmv file
-    
-    .EXAMPLE
-        Download-DMVFiles -destination 'C:\Temp\dmv\queries' 
+.DESCRIPTION
+This script will download the DMV files by Glenn Berry to a specific location
 
-    .INPUTS
+.PARAMETER destination
+Destination directory
 
-    .OUTPUTS
-        Return the location of the dmv file that was downloaded
+.PARAMETER sqlversion
+DVersion of the instance to specifically download the dmv file
 
-    .NOTES
+.EXAMPLE
+Get-DMVFile -destination 'C:\Temp\dmv\queries' 
 
-    .LINK
-    #>
+.INPUTS
+
+.OUTPUTS
+Return the location of the dmv file that was downloaded
+
+.NOTES
+
+.LINK
+#>
 
     param
     (
@@ -316,7 +336,9 @@ function Download-DMVFiles
         $url2008R2 = 'https://raw.githubusercontent.com/sanderstad/Export-DMVInformation/master/dmvfiles/SQL%20Server%202008%20R2%20Diagnostic%20Information%20Queries.sql'
         $url2012 = 'https://raw.githubusercontent.com/sanderstad/Export-DMVInformation/master/dmvfiles/SQL%20Server%202012%20Diagnostic%20Information%20Queries.sql'
         $url2014 = 'https://raw.githubusercontent.com/sanderstad/Export-DMVInformation/master/dmvfiles/SQL%20Server%202014%20Diagnostic%20Information%20Queries.sql'
+        $url2016presp1 = 'https://raw.githubusercontent.com/sanderstad/Export-DMVInformation/master/dmvfiles/SQL%20Server%202016%20PreSP1%20Diagnostic%20Information%20Queries.sql'
         $url2016 = 'https://raw.githubusercontent.com/sanderstad/Export-DMVInformation/master/dmvfiles/SQL%20Server%202016%20Diagnostic%20Information%20Queries.sql'
+        $url2017 = 'https://raw.githubusercontent.com/sanderstad/Export-DMVInformation/master/dmvfiles/SQL%20Server%202017%20Diagnostic%20Information%20Queries.sql'
         
         
         switch($sqlversion)
@@ -346,10 +368,20 @@ function Download-DMVFiles
                 $webClient.DownloadFile($url2014, "$destination\SQL Server 2014 Diagnostic Information Queries.sql")
                 return "$destination\SQL Server 2014 Diagnostic Information Queries.sql"
             }
+            {$_ -like '13.0.1*'} 
+            {
+                $webClient.DownloadFile($url2016presp1, "$destination\SQL Server 2016 PreSP1 Diagnostic Information Queries.sql")
+                return "$destination\SQL Server 2016 PreSP1 Diagnostic Information Queries.sql"
+            }
             {$_ -like '13*'} 
             {
                 $webClient.DownloadFile($url2016, "$destination\SQL Server 2016 Diagnostic Information Queries.sql")
                 return "$destination\SQL Server 2016 Diagnostic Information Queries.sql"
+            }
+            {$_ -like '14*'} 
+            {
+                $webClient.DownloadFile($url2017, "$destination\SQL Server 2017 Diagnostic Information Queries.sql")
+                return "$destination\SQL Server 2017 Diagnostic Information Queries.sql"
             }
         }
     }
@@ -363,25 +395,25 @@ function Download-DMVFiles
 
 function Parse-DMVFile
 {
-    <# 
-    .SYNOPSIS
-        Function to parse the DMV file
-    
-    .DESCRIPTION
-        This function will parse the DMV file and put it into an array.
-        It will designate each query with a title, description, if its database specific and the query itself
-    
-    .PARAMETER file
-        DMV file to parse
-    
-    .EXAMPLE
-        Parse-DMVFile -file 'C:\temp\queries\file.sql'
+<# 
+.SYNOPSIS
+    Function to parse the DMV file
 
-    .INPUTS
-    .OUTPUTS
-    .NOTES
-    .LINK
-    #>
+.DESCRIPTION
+    This function will parse the DMV file and put it into an array.
+    It will designate each query with a title, description, if its database specific and the query itself
+
+.PARAMETER file
+    DMV file to parse
+
+.EXAMPLE
+    Parse-DMVFile -file 'C:\temp\queries\file.sql'
+
+.INPUTS
+.OUTPUTS
+.NOTES
+.LINK
+#>
 
     param
     (
@@ -468,120 +500,6 @@ function Parse-DMVFile
     return $result
 }
 
-function Execute-Query
-{
-    <# 
-    .SYNOPSIS
-        Execute a query
-    
-    .DESCRIPTION
-        The function will create a connection to an instance and execute a query
-    
-    .PARAMETER instance
-        The instance to connect to
-        
-    .PARAMETER database 
-        The database to query out
-
-    .PARAMETER includeInstance
-        Flag to inlude the queries for the instance
-    
-    .PARAMETER username
-        Username needed if SQL authentication is required
-    
-    .PARAMETER password
-        Password needed if SQL authentication is required
-
-    .PARAMETER queryTimout
-        Timeout how long a query may take in seconds 
-
-    .EXAMPLE
-        Execute-Query -instance 'SERVER1' 
-
-    .EXAMPLE
-        Execute-Query -instance 'SERVER1' -database 'DB1'  
-
-    .EXAMPLE    
-        Execute-Query -instance 'SERVER1' -database 'DB1' -username 'user1' -password 'pass1'
-
-    .INPUTS
-    .OUTPUTS
-    .NOTES
-    .LINK
-    #>
-    param
-    (
-        [Parameter(Mandatory=$true, Position=1)]
-        [string]$instance,
-        [Parameter(Mandatory=$false, Position=2)]
-        [string]$database = $null,
-        [Parameter(Mandatory=$true, Position=3)]
-        [string]$query,
-        [Parameter(Mandatory=$false, Position=4)]
-        [string]$username = $null,
-        [Parameter(Mandatory=$false, Position=5)]
-        [string]$password = $null,
-        [Parameter(Mandatory=$false, Position=6)]
-        [int]$querytimeout = 300
-    )
-
-    # Create the connection object
-    $sqlConnection = New-Object System.Data.SqlClient.SqlConnection
-
-    # Check if the database is set
-    if($database -eq $null)
-    {
-        # Check if the sql authentication  or integrated security is needed
-        if(($username.Length -ge 1) -and ($password.Length -ge 1))
-        {
-            # Setup the connection with sql authentication for master database
-            $sqlConnection.ConnectionString = “Server=$instance;Database=master;User Id=$username;Password=$password”
-        }
-        else
-        {
-            # Setup the connection
-            $sqlConnection.ConnectionString = “Server=$instance;Database=master;Integrated Security=True”
-        }
-
-    }
-    else
-    {
-        # Check if the sql authentication  or integrated security is needed
-        if(($username.Length -ge 1) -and ($password.Length -ge 1))
-        {
-            # Setup the connection with sql authentication for master database
-            $sqlConnection.ConnectionString = “Server=$instance;Database=$database;User Id=$username;Password=$password”
-        }
-        else
-        {
-            # Setup the connection
-            $sqlConnection.ConnectionString = “Server=$instance;Database=$database;Integrated Security=True”
-        }
-    }
-
-    # Open the connection
-    $sqlConnection.Open()
-
-    # Setup the command
-    $sqlCommand = $sqlConnection.CreateCommand()
-    $sqlCommand.CommandText = $query
-    $sqlCommand.CommandTimeout = $querytimeout
-
-    # Setup the data adapter
-    $dataAdapter = New-Object System.Data.SqlClient.SqlDataAdapter $sqlCommand
-
-    # Setup the dataset
-    $dataset = New-Object System.Data.Dataset
-    $dataAdapter.Fill($dataset) | Out-Null
-
-    # Execute the query
-    $result = $dataset.Tables[0] | Select -Property * -ExcludeProperty RowError,RowState,Table,ItemArray,HasErrors
-
-    # Close the connection
-    $sqlConnection.Close()
-
-    return $result
-}
 
 function Load-Assembly
 {
@@ -606,7 +524,7 @@ function Load-Assembly
           [String] $name
      )
      
-     if(([System.AppDomain]::Currentdomain.GetAssemblies() | where {$_ -match $name}) -eq $null)
+     if(([System.AppDomain]::Currentdomain.GetAssemblies() | Where-Object {$_ -match $name}) -eq $null)
      {
         try{
             [System.Reflection.Assembly]::LoadWithPartialName($name) | Out-Null
